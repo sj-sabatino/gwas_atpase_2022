@@ -26,8 +26,8 @@ A Snakemake pipeline for processing paired-end FASTQ files using common bioinfor
 ├── samples.csv
 ├── data/                     # Input FASTQ files
 ├── ref/                      # Reference genome files
-├── adapters/                # Adapter sequences for Trimmomatic
-├── logs/                    # Logs per step per sample
+├── adapters/                 # Adapter sequences for Trimmomatic
+├── logs/                     # Logs per step per sample
 ├── trimmed/
 ├── aligned/
 ├── bam/
