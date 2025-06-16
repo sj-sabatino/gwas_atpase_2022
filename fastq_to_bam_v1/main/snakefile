@@ -1,0 +1,158 @@
+import os
+import pandas as pd
+from datetime import datetime
+
+configfile: "config.yaml"
+
+SAMPLEFILE = pd.read_csv(config["sample_table"], header=None)
+SAMPLES = SAMPLEFILE[0].tolist()
+#SAMPLES = config["samples"]
+
+REF = config["reference"]
+ADAPTERS = config["adapters"]
+LOGDIR = "logs"
+RES=config["resources"]
+
+# Create all necessary directories
+DIRS = ["logs", "qc/raw", "qc/trimmed", "trimmed", "aligned", "bam", "results", "metrics"]
+for d in DIRS:
+    os.makedirs(d, exist_ok=True)
+
+rule all:
+    input:
+        expand("results/{sample}.sorted.dedup.bam.bai", sample=SAMPLES),
+        expand("qc/raw/{sample}_R1_fastqc.html", sample=SAMPLES),
+        expand("qc/raw/{sample}_R2_fastqc.html", sample=SAMPLES),
+        expand("qc/trimmed/{sample}_R1_paired_fastqc.html", sample=SAMPLES),
+        expand("qc/trimmed/{sample}_R2_paired_fastqc.html", sample=SAMPLES)
+
+rule fastqc_raw:
+    input:
+        r1="data/{sample}_R1.fastq.gz",
+        r2="data/{sample}_R2.fastq.gz"
+    output:
+        "qc/raw/{sample}_R1_fastqc.html",
+        "qc/raw/{sample}_R2_fastqc.html"
+    log:
+        "logs/{sample}/fastqc_raw.log"
+    threads: RES["fastqc"]["threads"]
+    resources:
+        mem_mb=RES["fastqc"]["mem_mb"]
+    run:
+        shell(f"fastqc {input.r1} {input.r2} -o qc/raw -t {threads} &> {log[0]}")
+
+rule trim_reads:
+    input:
+        r1="data/{sample}_R1.fastq.gz",
+        r2="data/{sample}_R2.fastq.gz"
+    output:
+        r1_p="trimmed/{sample}_R1_paired.fq.gz",
+        r1_u="trimmed/{sample}_R1_unpaired.fq.gz",
+        r2_p="trimmed/{sample}_R2_paired.fq.gz",
+        r2_u="trimmed/{sample}_R2_unpaired.fq.gz"
+    log:
+        "logs/{sample}/trim_reads.log"
+    threads: RES["trimmomatic"]["threads"]
+    resources:
+        mem_mb=RES["trimmomatic"]["mem_mb"]
+    run:
+        shell(f"""
+            trimmomatic PE -threads {threads} {input.r1} {input.r2} \
+            {output.r1_p} {output.r1_u} \
+            {output.r2_p} {output.r2_u} \
+            ILLUMINACLIP:{ADAPTERS}:2:20:10:1:true \
+            LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36 \
+            2> {log[0]}
+        """)
+ 
+
+rule fastqc_trimmed:
+    input:
+        r1="trimmed/{sample}_R1_paired.fq.gz",
+        r2="trimmed/{sample}_R2_paired.fq.gz"
+    output:
+        "qc/trimmed/{sample}_R1_paired_fastqc.html",
+        "qc/trimmed/{sample}_R2_paired_fastqc.html"
+    log:
+        "logs/{sample}/fastqc_trimmed.log"
+    threads: RES["fastqc"]["threads"]
+    resources:
+        mem_mb=RES["fastqc"]["mem_mb"]
+    run:
+        shell(f"fastqc {input.r1} {input.r2} -o qc/trimmed -t {threads} &> {log[0]}")
+
+
+rule bwa_index:
+    input:
+        REF
+    output:
+        touch("index/.bwa_index_done")  # Flag file to track completion
+    log:
+        "logs/bwa_index.log"
+    threads: RES["bwa"]["threads"]
+    run:
+        # Check if all BWA index files exist
+        index_files = [REF + ext for ext in [".amb", ".ann", ".bwt", ".pac", ".sa"]]
+        all_exist = all(os.path.exists(f) for f in index_files)        
+        if config.get("skip_index", False):
+            print('all good')
+        else:
+            shell(f"bwa index {input[0]} &> {log[0]}")
+
+
+rule align:
+    input:
+        ref=REF,
+        idx=REF + ".bwt",
+        r1="trimmed/{sample}_R1_paired.fq.gz",
+        r2="trimmed/{sample}_R2_paired.fq.gz"
+    output:
+        temp("aligned/{sample}.sam")
+    log:
+        "logs/{sample}/align.log"
+    threads: RES["bwa"]["threads"]
+    resources:
+        mem_mb=RES["bwa"]["mem_mb"]
+    shell:
+        """
+        bwa mem -t {threads} \
+            -R '@RG\\tID:{wildcards.sample}\\tSM:{wildcards.sample}\\tPL:ILLUMINA' \
+            {input.ref} {input.r1} {input.r2} > {output} 2> {log}
+        """
+
+rule sam_to_sorted_bam:
+    input:
+        sam="aligned/{sample}.sam"
+    output:
+        bam="bam/{sample}.sorted.bam"
+    log:
+        "logs/{sample}/sam_to_sorted_bam.log"
+    params:
+        sort_mem=RES["samtools_sort"]["sort_mem"]
+    threads: RES["samtools_sort"]["threads"]
+    resources:
+        mem_mb=RES["samtools_sort"]["mem_mb"]
+    run:
+        shell(f"""
+            samtools view -@ {threads} -bS {input.sam} | \
+            samtools sort -@ {threads} -m {params.sort_mem} -o {output.bam} - 2> {log[0]}
+        """)
+
+
+rule mark_duplicates:
+    input:
+        "bam/{sample}.sorted.bam"
+    output:
+        bam="results/{sample}.sorted.dedup.bam",
+        bai="results/{sample}.sorted.dedup.bam.bai"
+    params:
+        java_mem=RES["picard"]["java_mem"],
+        metrics="metrics/{sample}_dup_metrics.txt"
+    log:
+        "logs/{sample}/mark_duplicates.log"
+    threads: RES["picard"]["threads"]
+    resources:
+        mem_mb=8000
+    run:
+        shell(f"picard {params.java_mem} MarkDuplicates I={input[0]} O={output.bam} M={params.metrics} REMOVE_DUPLICATES=true VALIDATION_STRINGENCY=LENIENT 2> {log[0]}")
+        shell(f"samtools index {output.bam} 2>> {log[0]}")

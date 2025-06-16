@@ -1,0 +1,38 @@
+samples:
+  - sample1
+  - sample2
+
+sample_table: samples.csv
+
+reference: ref/genome.fa                # Reference genome FASTA
+adapters: adapters/TruSeq3-PE.fa        # Adapter file for trim
+skip_index: true                        # Set to false to force BWA indexing
+
+tool_versions:
+  bwa: "0.7.17"
+  trimmomatic: "0.39"
+  picard: "2.26.10"
+  fastqc: "0.11.9"
+  samtools: "1.17"
+
+
+# Tool-specific resource settings
+resources:
+  fastqc:
+    threads: 2
+    mem_mb: 2000
+  trimmomatic:
+    threads: 4
+    mem_mb: 4000
+  bwa:
+    threads: 63
+    mem_mb: 16000
+  samtools_sort:
+    threads: 4
+    mem_mb: 4000
+    sort_mem: "4G"  # passed to `samtools sort -m`
+  picard:
+    java_mem: "-Xmx8G"
+    max_heap: "8G"
+    threads: 1
+    mem_mb: 8000
